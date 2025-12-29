@@ -1,2 +1,155 @@
-# openwebui-imap-email-tool
-Access and manage emails via IMAP/SMTP. Search, read, compose, and send emails.
+# IMAP Email Tool for Open WebUI
+
+Access and manage emails via IMAP/SMTP directly from Open WebUI. Search, read, compose, and send emails through an AI assistant.
+
+## Features
+
+### Reading & Searching
+- **List Folders** - View all email folders with message counts and unread stats
+- **Search Emails** - Flexible search with multiple criteria (ALL, UNSEEN, FLAGGED, FROM, SUBJECT, TEXT, SINCE)
+- **Get Email** - Read full email content including headers and body
+- **List Unread** - Quick access to unread messages
+- **Folder Stats** - Get total and unread message counts for any folder
+
+### Managing
+- **Mark as Read** - Update email read status
+- **Move Email** - Move messages between folders (with automatic fallback to copy+delete)
+
+### Composing & Sending
+- **Create Draft** - Save drafts to the Drafts folder
+- **Send Email** - Send messages immediately via SMTP with CC/BCC support
+- **Reply to Email** - Reply or reply-all with proper threading (In-Reply-To, References headers)
+
+## Requirements
+
+- Open WebUI 0.4.0 or later
+- Python package: `imapclient`
+
+## Installation
+
+1. Go to **Workspace** → **Tools** in Open WebUI
+2. Click **+** to add a new tool
+3. Paste the contents of `openwebui_tool.py`
+4. Save the tool
+
+## Configuration
+
+Configure the tool via **Valves** (tool settings):
+
+### IMAP Settings
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `imap_host` | - | IMAP server hostname (e.g., `imap.gmail.com`) |
+| `imap_port` | 993 | IMAP port (993 for SSL, 143 for plain) |
+| `imap_username` | - | Email address / username |
+| `imap_password` | - | Password or app-specific password |
+| `use_ssl` | true | Use SSL/TLS connection |
+
+### SMTP Settings
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `smtp_host` | - | SMTP server (auto-derived from IMAP if empty) |
+| `smtp_port` | 587 | SMTP port (587 for STARTTLS, 465 for SSL) |
+| `smtp_use_tls` | true | Use STARTTLS (port 587) |
+| `smtp_use_ssl` | false | Use SSL (port 465, overrides TLS) |
+
+### Sender Settings
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `sender_name` | - | Display name for sent emails (e.g., "John Doe") |
+
+### Example Configurations
+
+**Gmail:**
+```
+imap_host: imap.gmail.com
+imap_port: 993
+smtp_host: smtp.gmail.com
+smtp_port: 587
+smtp_use_tls: true
+```
+> Note: Gmail requires an [App Password](https://support.google.com/accounts/answer/185833)
+
+**Microsoft 365 / Outlook:**
+```
+imap_host: outlook.office365.com
+imap_port: 993
+smtp_host: smtp.office365.com
+smtp_port: 587
+smtp_use_tls: true
+```
+
+## System Prompt
+
+For the best experience, add the system prompt to your model configuration. The system prompt teaches the AI how to effectively use the email tool.
+
+See [system_prompt.md](system_prompt.md) for ready-to-use prompts in **English** and **German**.
+
+### Quick Setup
+1. Go to **Admin Panel** → **Settings** → **Models**
+2. Select your model (GPT-4, Claude, Llama, etc.)
+3. Paste the system prompt from `system_prompt.md`
+4. Save
+
+## Available Functions
+
+| Function | Parameters | Description |
+|----------|------------|-------------|
+| `list_folders()` | - | List all folders with message counts |
+| `search_emails()` | `query`, `folder`, `limit` | Search emails |
+| `get_email()` | `uid`, `folder` | Get full email content |
+| `list_unread()` | `folder`, `limit` | List unread emails |
+| `get_folder_stats()` | `folder` | Get folder statistics |
+| `mark_as_read()` | `uid`, `folder` | Mark email as read |
+| `move_email()` | `uid`, `source_folder`, `dest_folder` | Move email |
+| `create_draft()` | `to`, `subject`, `body`, `cc` | Create draft |
+| `send_email()` | `to`, `subject`, `body`, `cc`, `bcc` | Send email |
+| `reply_to_email()` | `uid`, `body`, `folder`, `reply_all` | Reply to email |
+
+### Search Query Syntax
+
+| Query | Description |
+|-------|-------------|
+| `ALL` | All emails |
+| `UNSEEN` | Unread emails |
+| `FLAGGED` | Flagged/starred emails |
+| `FROM:email` | Emails from specific sender |
+| `SUBJECT:text` | Emails with subject containing text |
+| `TEXT:content` | Full-text search |
+| `SINCE:date` | Emails since date |
+
+## Example Usage
+
+**User:** "Show me my unread emails"
+- AI calls `list_unread()` and presents results
+
+**User:** "Read the email from John"
+- AI calls `search_emails("FROM:john")` to find UIDs
+- AI calls `get_email(uid)` to fetch content
+
+**User:** "Reply with 'Thanks for the update'"
+- AI calls `reply_to_email(uid, "Thanks for the update")`
+
+**User:** "Send an email to team@company.com about the meeting"
+- AI asks for details, creates draft with `create_draft()`
+- Shows draft for confirmation
+- Sends with `send_email()` upon approval
+
+## Security Notes
+
+- Use app-specific passwords when available (Gmail, Microsoft, etc.)
+- Credentials are stored in Open WebUI's valve configuration
+- The tool uses secure connections (SSL/TLS) by default
+- Sent emails are automatically saved to the Sent folder
+
+## Author
+
+**Sandro Scalco** - [liitu consulting gmbh](https://liitu.ch)
+
+## License
+
+MIT License
+
+## Version
+
+0.2.0
