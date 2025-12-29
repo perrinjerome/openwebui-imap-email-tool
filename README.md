@@ -27,10 +27,42 @@ Access and manage emails via IMAP/SMTP directly from Open WebUI. Search, read, c
 
 ## Installation
 
-1. Go to **Workspace** → **Tools** in Open WebUI
-2. Click **+** to add a new tool
-3. Paste the contents of `openwebui_tool.py`
-4. Save the tool
+### Step 1: Add the Tool
+
+1. Open **Open WebUI** in your browser
+2. Go to **Workspace** → **Tools** (in the left sidebar)
+3. Click the **+** button to create a new tool
+4. Copy the entire contents of `openwebui_tool.py` and paste it into the code editor
+5. Click **Save**
+6. The tool "IMAP Email Tool" should now appear in your tools list
+
+### Step 2: Configure the Tool (Valves)
+
+1. In **Workspace** → **Tools**, find "IMAP Email Tool"
+2. Click the **gear icon** (⚙️) to open Valves settings
+3. Fill in your email server credentials (see [Configuration](#configuration) below)
+4. Click **Save**
+
+### Step 3: Create a Model with the Email Tool
+
+1. Go to **Workspace** → **Models**
+2. Click **+** to create a new model
+3. Configure the model:
+   - **Name**: Give it a descriptive name (e.g., "Email Assistant")
+   - **Base Model**: Select your preferred LLM (GPT-4, Claude, Llama, etc.)
+   - **System Prompt**: Copy and paste the system prompt from [system_prompt.md](system_prompt.md)
+     - Use the **English** or **German** version depending on your preference
+   - **Tools**: Enable the **IMAP Email Tool** by selecting it from the available tools
+4. Click **Save**
+
+### Step 4: Start Using
+
+1. Go to **New Chat**
+2. Select your newly created "Email Assistant" model from the model dropdown
+3. Start chatting! Try commands like:
+   - "Show me my unread emails"
+   - "Search for emails from john@example.com"
+   - "Read the latest email"
 
 ## Configuration
 
@@ -81,15 +113,14 @@ smtp_use_tls: true
 
 ## System Prompt
 
-For the best experience, add the system prompt to your model configuration. The system prompt teaches the AI how to effectively use the email tool.
+The system prompt teaches the AI how to effectively use the email tool. It includes:
+
+- Available functions and their parameters
+- Best practices (confirm before sending, use drafts for complex emails)
+- Example workflows for common tasks
+- Formatting guidelines
 
 See [system_prompt.md](system_prompt.md) for ready-to-use prompts in **English** and **German**.
-
-### Quick Setup
-1. Go to **Admin Panel** → **Settings** → **Models**
-2. Select your model (GPT-4, Claude, Llama, etc.)
-3. Paste the system prompt from `system_prompt.md`
-4. Save
 
 ## Available Functions
 
