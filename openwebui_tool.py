@@ -177,6 +177,8 @@ class Tools:
 
     def __init__(self):
         self.valves = self.Valves()
+        self._pool_lock = threading.Lock()
+        self._cached_client: Optional[IMAPClient] = None
 
     def _create_message(
         self,
@@ -203,8 +205,8 @@ class Tools:
 
         return msg
 
-    def _get_client(self) -> IMAPClient:
-        """Create and connect IMAP client."""
+    def _new_client(self) -> IMAPClient:
+        """Create a fresh IMAP connection."""
         if not self.valves.imap_host or not self.valves.imap_username:
             raise ValueError(
                 "IMAP not configured. Please set host, username and password in Valves."
@@ -227,11 +229,51 @@ class Tools:
             client.login(self.valves.imap_username, self.valves.imap_password)
         return client
 
+    @contextmanager
+    def _client(self):
+        """Borrow an IMAP client from the pool, return it on exit."""
+        with self._pool_lock:
+            client = self._cached_client
+            self._cached_client = None
+
+        if client is not None:
+            try:
+                with _imap_timer("NOOP"):
+                    client.noop()
+                log.debug("Reusing pooled IMAP connection")
+            except Exception:
+                log.debug("Pooled connection stale, reconnecting")
+                try:
+                    client.logout()
+                except Exception:
+                    pass
+                client = None
+
+        if client is None:
+            client = self._new_client()
+
+        try:
+            yield client
+        except Exception:
+            try:
+                client.logout()
+            except Exception:
+                pass
+            raise
+        else:
+            with self._pool_lock:
+                old = self._cached_client
+                self._cached_client = client
+            if old is not None:
+                try:
+                    old.logout()
+                except Exception:
+                    pass
+
     def _sync_list_folders(self) -> str:
         _start_timing()
         log.info("list_folders()")
-        client = self._get_client()
-        try:
+        with self._client() as client:
             with _imap_timer("LIST"):
                 raw_folders = client.list_folders()
             folders = []
@@ -248,8 +290,6 @@ class Tools:
 
             log.info("list_folders: found %d folders", len(folders))
             return _finalize_response(json.dumps(folders, indent=2))
-        finally:
-            client.logout()
 
     async def list_folders(self) -> str:
         """
@@ -262,10 +302,15 @@ class Tools:
     def _sync_search_emails(self, query: str, folder: str, limit: int) -> str:
         _start_timing()
         log.info("search_emails(query=%r, folder=%r, limit=%d)", query, folder, limit)
-        client = self._get_client()
-        try:
+        with self._client() as client:
             with _imap_timer(f"SELECT {folder!r}"):
                 client.select_folder(folder, readonly=True)
+
+            def _extract_value(q: str, prefix_len: int) -> str:
+                v = q[prefix_len:].strip()
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+                    v = v[1:-1]
+                return v
 
             if query.upper() == "ALL":
                 search_criteria = ["ALL"]
@@ -274,13 +319,13 @@ class Tools:
             elif query.upper() == "FLAGGED":
                 search_criteria = ["FLAGGED"]
             elif query.upper().startswith("FROM:"):
-                search_criteria = ["FROM", query[5:].strip()]
+                search_criteria = ["FROM", _extract_value(query, 5)]
             elif query.upper().startswith("SUBJECT:"):
-                search_criteria = ["SUBJECT", query[8:].strip()]
+                search_criteria = ["SUBJECT", _extract_value(query, 8)]
             elif query.upper().startswith("SINCE:"):
-                search_criteria = ["SINCE", query[6:].strip()]
+                search_criteria = ["SINCE", _extract_value(query, 6)]
             elif query.upper().startswith("TEXT:"):
-                search_criteria = ["TEXT", query[5:].strip()]
+                search_criteria = ["TEXT", _extract_value(query, 5)]
             else:
                 search_criteria = ["TEXT", query]
 
@@ -346,8 +391,6 @@ class Tools:
             return _finalize_response(
                 json.dumps({"count": len(results), "results": results}, indent=2)
             )
-        finally:
-            client.logout()
 
     async def search_emails(
         self,
@@ -368,8 +411,7 @@ class Tools:
     def _sync_get_email(self, uid: int, folder: str) -> str:
         _start_timing()
         log.info("get_email(uid=%d, folder=%r)", uid, folder)
-        client = self._get_client()
-        try:
+        with self._client() as client:
             with _imap_timer(f"SELECT {folder!r}"):
                 client.select_folder(folder, readonly=True)
 
@@ -451,8 +493,6 @@ class Tools:
 
             log.info("get_email: uid=%d subject=%r", uid, subject)
             return _finalize_response(json.dumps(result, indent=2))
-        finally:
-            client.logout()
 
     async def get_email(self, uid: int, folder: str = "INBOX") -> str:
         """
@@ -477,8 +517,7 @@ class Tools:
     def _sync_get_folder_stats(self, folder: str) -> str:
         _start_timing()
         log.info("get_folder_stats(folder=%r)", folder)
-        client = self._get_client()
-        try:
+        with self._client() as client:
             with _imap_timer(f"STATUS {folder!r}"):
                 status = client.folder_status(folder, ["MESSAGES", "UNSEEN"])
             total = status.get(b"MESSAGES", 0)
@@ -492,8 +531,6 @@ class Tools:
                 },
                 indent=2,
             ))
-        finally:
-            client.logout()
 
     async def get_folder_stats(self, folder: str = "INBOX") -> str:
         """
@@ -507,8 +544,7 @@ class Tools:
     def _sync_mark_as_read(self, uid: int, folder: str) -> str:
         _start_timing()
         log.info("mark_as_read(uid=%d, folder=%r)", uid, folder)
-        client = self._get_client()
-        try:
+        with self._client() as client:
             with _imap_timer(f"SELECT {folder!r}"):
                 client.select_folder(folder, readonly=False)
             with _imap_timer(f"STORE +FLAGS \\Seen uid={uid}"):
@@ -517,8 +553,6 @@ class Tools:
             return _finalize_response(
                 json.dumps({"success": True, "message": "Email marked as read"})
             )
-        finally:
-            client.logout()
 
     async def mark_as_read(self, uid: int, folder: str = "INBOX") -> str:
         """
@@ -539,8 +573,7 @@ class Tools:
 
         msg = self._create_message(to=to, subject=subject, body=body, cc=cc)
 
-        client = self._get_client()
-        try:
+        with self._client() as client:
             with _imap_timer("LIST (find drafts folder)"):
                 raw_folders = client.list_folders()
 
@@ -577,8 +610,6 @@ class Tools:
                 },
                 indent=2,
             ))
-        finally:
-            client.logout()
 
     async def create_draft(
         self,
@@ -601,8 +632,7 @@ class Tools:
     def _sync_move_email(self, uid: int, source_folder: str, dest_folder: str) -> str:
         _start_timing()
         log.info("move_email(uid=%d, %r -> %r)", uid, source_folder, dest_folder)
-        client = self._get_client()
-        try:
+        with self._client() as client:
             with _imap_timer(f"SELECT {source_folder!r}"):
                 client.select_folder(source_folder, readonly=False)
             try:
@@ -621,8 +651,6 @@ class Tools:
             return _finalize_response(json.dumps(
                 {"success": True, "message": f"Email moved to {dest_folder}"}
             ))
-        finally:
-            client.logout()
 
     async def move_email(self, uid: int, source_folder: str, dest_folder: str) -> str:
         """
