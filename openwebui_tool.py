@@ -230,33 +230,26 @@ class Tools:
     def _sync_list_folders(self) -> str:
         _start_timing()
         log.info("list_folders()")
+        client = self._get_client()
         try:
-            client = self._get_client()
-            try:
-                with _imap_timer("LIST"):
-                    raw_folders = client.list_folders()
-                folders = []
-                for flags, delimiter, name in raw_folders:
-                    try:
-                        with _imap_timer(f"STATUS {name!r}"):
-                            status = client.folder_status(name, ["MESSAGES", "UNSEEN"])
-                        folders.append(
-                            {
-                                "name": name,
-                                "messages": status.get(b"MESSAGES", 0),
-                                "unread": status.get(b"UNSEEN", 0),
-                            }
-                        )
-                    except Exception:
-                        folders.append({"name": name, "messages": None, "unread": None})
+            with _imap_timer("LIST"):
+                raw_folders = client.list_folders()
+            folders = []
+            for flags, delimiter, name in raw_folders:
+                with _imap_timer(f"STATUS {name!r}"):
+                    status = client.folder_status(name, ["MESSAGES", "UNSEEN"])
+                folders.append(
+                    {
+                        "name": name,
+                        "messages": status.get(b"MESSAGES", 0),
+                        "unread": status.get(b"UNSEEN", 0),
+                    }
+                )
 
-                log.info("list_folders: found %d folders", len(folders))
-                return _finalize_response(json.dumps(folders, indent=2))
-            finally:
-                client.logout()
-        except Exception as e:
-            log.exception("list_folders failed")
-            return _finalize_response(json.dumps({"error": str(e)}))
+            log.info("list_folders: found %d folders", len(folders))
+            return _finalize_response(json.dumps(folders, indent=2))
+        finally:
+            client.logout()
 
     async def list_folders(self) -> str:
         """
@@ -269,96 +262,92 @@ class Tools:
     def _sync_search_emails(self, query: str, folder: str, limit: int) -> str:
         _start_timing()
         log.info("search_emails(query=%r, folder=%r, limit=%d)", query, folder, limit)
+        client = self._get_client()
         try:
-            client = self._get_client()
-            try:
-                with _imap_timer(f"SELECT {folder!r}"):
-                    client.select_folder(folder, readonly=True)
+            with _imap_timer(f"SELECT {folder!r}"):
+                client.select_folder(folder, readonly=True)
 
-                if query.upper() == "ALL":
-                    search_criteria = ["ALL"]
-                elif query.upper() == "UNSEEN":
-                    search_criteria = ["UNSEEN"]
-                elif query.upper() == "FLAGGED":
-                    search_criteria = ["FLAGGED"]
-                elif query.upper().startswith("FROM:"):
-                    search_criteria = ["FROM", query[5:].strip()]
-                elif query.upper().startswith("SUBJECT:"):
-                    search_criteria = ["SUBJECT", query[8:].strip()]
-                elif query.upper().startswith("SINCE:"):
-                    search_criteria = ["SINCE", query[6:].strip()]
-                elif query.upper().startswith("TEXT:"):
-                    search_criteria = ["TEXT", query[5:].strip()]
-                else:
-                    search_criteria = ["TEXT", query]
+            if query.upper() == "ALL":
+                search_criteria = ["ALL"]
+            elif query.upper() == "UNSEEN":
+                search_criteria = ["UNSEEN"]
+            elif query.upper() == "FLAGGED":
+                search_criteria = ["FLAGGED"]
+            elif query.upper().startswith("FROM:"):
+                search_criteria = ["FROM", query[5:].strip()]
+            elif query.upper().startswith("SUBJECT:"):
+                search_criteria = ["SUBJECT", query[8:].strip()]
+            elif query.upper().startswith("SINCE:"):
+                search_criteria = ["SINCE", query[6:].strip()]
+            elif query.upper().startswith("TEXT:"):
+                search_criteria = ["TEXT", query[5:].strip()]
+            else:
+                search_criteria = ["TEXT", query]
 
-                with _imap_timer(f"SEARCH {search_criteria}"):
-                    uids = client.search(search_criteria)
-                log.info("IMAP SEARCH returned %d UIDs", len(uids))
-                uids = sorted(uids, reverse=True)[:limit]
+            with _imap_timer(f"SEARCH {search_criteria}"):
+                uids = client.search(search_criteria)
+            log.info("IMAP SEARCH returned %d UIDs", len(uids))
+            uids = sorted(uids, reverse=True)[:limit]
 
-                if not uids:
-                    return _finalize_response(json.dumps({"count": 0, "results": []}))
+            if not uids:
+                return _finalize_response(json.dumps({"count": 0, "results": []}))
 
-                with _imap_timer(f"FETCH ENVELOPE for {len(uids)} UIDs"):
-                    fetch_data = client.fetch(uids, ["ENVELOPE", "FLAGS"])
+            with _imap_timer(f"FETCH ENVELOPE for {len(uids)} UIDs"):
+                fetch_data = client.fetch(uids, ["ENVELOPE", "FLAGS"])
 
-                results = []
-                for uid, data in fetch_data.items():
-                    envelope = data.get(b"ENVELOPE")
-                    flags = data.get(b"FLAGS", ())
+            results = []
+            for uid, data in fetch_data.items():
+                envelope = data.get(b"ENVELOPE")
+                flags = data.get(b"FLAGS", ())
 
-                    if envelope:
-                        subject = decode_mime_header(
-                            envelope.subject.decode("utf-8", errors="replace")
-                            if envelope.subject
+                if envelope:
+                    subject = decode_mime_header(
+                        envelope.subject.decode("utf-8", errors="replace")
+                        if envelope.subject
+                        else ""
+                    )
+
+                    from_addr = ""
+                    if envelope.from_ and len(envelope.from_) > 0:
+                        addr = envelope.from_[0]
+                        name = (
+                            addr.name.decode("utf-8", errors="replace")
+                            if addr.name
                             else ""
                         )
-
-                        from_addr = ""
-                        if envelope.from_ and len(envelope.from_) > 0:
-                            addr = envelope.from_[0]
-                            name = (
-                                addr.name.decode("utf-8", errors="replace")
-                                if addr.name
-                                else ""
-                            )
-                            mailbox = (
-                                addr.mailbox.decode("utf-8", errors="replace")
-                                if addr.mailbox
-                                else ""
-                            )
-                            host = (
-                                addr.host.decode("utf-8", errors="replace")
-                                if addr.host
-                                else ""
-                            )
-                            email_str = f"{mailbox}@{host}"
-                            from_addr = f"{name} <{email_str}>" if name else email_str
-
-                        date = envelope.date
-                        date_str = date.isoformat() if date else None
-
-                        results.append(
-                            {
-                                "uid": uid,
-                                "subject": subject,
-                                "from": from_addr,
-                                "date": date_str,
-                                "is_read": b"\\Seen" in flags,
-                                "is_flagged": b"\\Flagged" in flags,
-                            }
+                        mailbox = (
+                            addr.mailbox.decode("utf-8", errors="replace")
+                            if addr.mailbox
+                            else ""
                         )
+                        host = (
+                            addr.host.decode("utf-8", errors="replace")
+                            if addr.host
+                            else ""
+                        )
+                        email_str = f"{mailbox}@{host}"
+                        from_addr = f"{name} <{email_str}>" if name else email_str
 
-                log.info("search_emails: returning %d results", len(results))
-                return _finalize_response(
-                    json.dumps({"count": len(results), "results": results}, indent=2)
-                )
-            finally:
-                client.logout()
-        except Exception as e:
-            log.exception("search_emails failed")
-            return _finalize_response(json.dumps({"error": str(e)}))
+                    date = envelope.date
+                    date_str = date.isoformat() if date else None
+
+                    results.append(
+                        {
+                            "uid": uid,
+                            "subject": subject,
+                            "from": from_addr,
+                            "date": date_str,
+                            "is_read": b"\\Seen" in flags,
+                            "is_flagged": b"\\Flagged" in flags,
+                        }
+                    )
+
+            log.info("search_emails: returning %d results", len(results))
+            return _finalize_response(
+                json.dumps({"count": len(results), "results": results}, indent=2)
+            )
+        finally:
+            client.logout()
 
     async def search_emails(
         self,
@@ -379,99 +368,91 @@ class Tools:
     def _sync_get_email(self, uid: int, folder: str) -> str:
         _start_timing()
         log.info("get_email(uid=%d, folder=%r)", uid, folder)
+        client = self._get_client()
         try:
-            client = self._get_client()
-            try:
-                with _imap_timer(f"SELECT {folder!r}"):
-                    client.select_folder(folder, readonly=True)
+            with _imap_timer(f"SELECT {folder!r}"):
+                client.select_folder(folder, readonly=True)
 
-                with _imap_timer(f"FETCH RFC822 uid={uid}"):
-                    fetch_data = client.fetch([uid], ["RFC822", "FLAGS"])
+            with _imap_timer(f"FETCH RFC822 uid={uid}"):
+                fetch_data = client.fetch([uid], ["RFC822", "FLAGS"])
 
-                if uid not in fetch_data:
-                    return _finalize_response(
-                        json.dumps({"error": f"Email with UID {uid} not found"})
-                    )
+            if uid not in fetch_data:
+                raise ValueError(f"Email with UID {uid} not found")
 
-                data = fetch_data[uid]
-                raw_email = data.get(b"RFC822")
-                flags = [
-                    f.decode() if isinstance(f, bytes) else f
-                    for f in data.get(b"FLAGS", ())
-                ]
+            data = fetch_data[uid]
+            raw_email = data.get(b"RFC822")
+            flags = [
+                f.decode() if isinstance(f, bytes) else f
+                for f in data.get(b"FLAGS", ())
+            ]
 
-                if not raw_email:
-                    return _finalize_response(
-                        json.dumps({"error": "Could not fetch email content"})
-                    )
+            if not raw_email:
+                raise ValueError("Could not fetch email content")
 
-                log.debug("IMAP FETCH uid=%d: %d bytes", uid, len(raw_email))
-                msg = email.message_from_bytes(raw_email)
+            log.debug("IMAP FETCH uid=%d: %d bytes", uid, len(raw_email))
+            msg = email.message_from_bytes(raw_email)
 
-                subject = decode_mime_header(msg.get("Subject", ""))
-                from_addr = parse_address(msg.get("From"))
-                to_addrs = parse_address_list(msg.get("To"))
-                cc_addrs = parse_address_list(msg.get("Cc"))
+            subject = decode_mime_header(msg.get("Subject", ""))
+            from_addr = parse_address(msg.get("From"))
+            to_addrs = parse_address_list(msg.get("To"))
+            cc_addrs = parse_address_list(msg.get("Cc"))
 
-                date = None
-                date_str = msg.get("Date")
-                if date_str:
-                    try:
-                        date = parsedate_to_datetime(date_str)
-                    except Exception:
-                        pass
+            date = None
+            date_str = msg.get("Date")
+            if date_str:
+                try:
+                    date = parsedate_to_datetime(date_str)
+                except Exception:
+                    pass
 
-                body_text = None
-                body_html = None
+            body_text = None
+            body_html = None
 
-                if msg.is_multipart():
-                    for part in msg.walk():
-                        content_type = part.get_content_type()
-                        if content_type == "text/plain" and body_text is None:
-                            payload = part.get_payload(decode=True)
-                            if payload:
-                                charset = part.get_content_charset() or "utf-8"
-                                body_text = payload.decode(charset, errors="replace")
-                        elif content_type == "text/html" and body_html is None:
-                            payload = part.get_payload(decode=True)
-                            if payload:
-                                charset = part.get_content_charset() or "utf-8"
-                                body_html = payload.decode(charset, errors="replace")
-                else:
-                    content_type = msg.get_content_type()
-                    payload = msg.get_payload(decode=True)
-                    if payload:
-                        charset = msg.get_content_charset() or "utf-8"
-                        text = payload.decode(charset, errors="replace")
-                        if content_type == "text/html":
-                            body_html = text
-                        else:
-                            body_text = text
+            if msg.is_multipart():
+                for part in msg.walk():
+                    content_type = part.get_content_type()
+                    if content_type == "text/plain" and body_text is None:
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            charset = part.get_content_charset() or "utf-8"
+                            body_text = payload.decode(charset, errors="replace")
+                    elif content_type == "text/html" and body_html is None:
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            charset = part.get_content_charset() or "utf-8"
+                            body_html = payload.decode(charset, errors="replace")
+            else:
+                content_type = msg.get_content_type()
+                payload = msg.get_payload(decode=True)
+                if payload:
+                    charset = msg.get_content_charset() or "utf-8"
+                    text = payload.decode(charset, errors="replace")
+                    if content_type == "text/html":
+                        body_html = text
+                    else:
+                        body_text = text
 
-                body = body_text
-                if not body and body_html:
-                    body = re.sub(r"<[^>]+>", "", body_html)
-                    body = re.sub(r"\s+", " ", body).strip()
+            body = body_text
+            if not body and body_html:
+                body = re.sub(r"<[^>]+>", "", body_html)
+                body = re.sub(r"\s+", " ", body).strip()
 
-                result = {
-                    "uid": uid,
-                    "subject": subject,
-                    "from": str(from_addr),
-                    "to": [str(a) for a in to_addrs],
-                    "cc": [str(a) for a in cc_addrs],
-                    "date": date.isoformat() if date else None,
-                    "body": body or "",
-                    "is_read": "\\Seen" in flags,
-                    "is_flagged": "\\Flagged" in flags,
-                }
+            result = {
+                "uid": uid,
+                "subject": subject,
+                "from": str(from_addr),
+                "to": [str(a) for a in to_addrs],
+                "cc": [str(a) for a in cc_addrs],
+                "date": date.isoformat() if date else None,
+                "body": body or "",
+                "is_read": "\\Seen" in flags,
+                "is_flagged": "\\Flagged" in flags,
+            }
 
-                log.info("get_email: uid=%d subject=%r", uid, subject)
-                return _finalize_response(json.dumps(result, indent=2))
-            finally:
-                client.logout()
-        except Exception as e:
-            log.exception("get_email failed")
-            return _finalize_response(json.dumps({"error": str(e)}))
+            log.info("get_email: uid=%d subject=%r", uid, subject)
+            return _finalize_response(json.dumps(result, indent=2))
+        finally:
+            client.logout()
 
     async def get_email(self, uid: int, folder: str = "INBOX") -> str:
         """
@@ -496,27 +477,23 @@ class Tools:
     def _sync_get_folder_stats(self, folder: str) -> str:
         _start_timing()
         log.info("get_folder_stats(folder=%r)", folder)
+        client = self._get_client()
         try:
-            client = self._get_client()
-            try:
-                with _imap_timer(f"STATUS {folder!r}"):
-                    status = client.folder_status(folder, ["MESSAGES", "UNSEEN"])
-                total = status.get(b"MESSAGES", 0)
-                unread = status.get(b"UNSEEN", 0)
-                log.info("get_folder_stats: %s has %d messages (%d unread)", folder, total, unread)
-                return _finalize_response(json.dumps(
-                    {
-                        "folder": folder,
-                        "total_messages": total,
-                        "unread_messages": unread,
-                    },
-                    indent=2,
-                ))
-            finally:
-                client.logout()
-        except Exception as e:
-            log.exception("get_folder_stats failed")
-            return _finalize_response(json.dumps({"error": str(e)}))
+            with _imap_timer(f"STATUS {folder!r}"):
+                status = client.folder_status(folder, ["MESSAGES", "UNSEEN"])
+            total = status.get(b"MESSAGES", 0)
+            unread = status.get(b"UNSEEN", 0)
+            log.info("get_folder_stats: %s has %d messages (%d unread)", folder, total, unread)
+            return _finalize_response(json.dumps(
+                {
+                    "folder": folder,
+                    "total_messages": total,
+                    "unread_messages": unread,
+                },
+                indent=2,
+            ))
+        finally:
+            client.logout()
 
     async def get_folder_stats(self, folder: str = "INBOX") -> str:
         """
@@ -530,22 +507,18 @@ class Tools:
     def _sync_mark_as_read(self, uid: int, folder: str) -> str:
         _start_timing()
         log.info("mark_as_read(uid=%d, folder=%r)", uid, folder)
+        client = self._get_client()
         try:
-            client = self._get_client()
-            try:
-                with _imap_timer(f"SELECT {folder!r}"):
-                    client.select_folder(folder, readonly=False)
-                with _imap_timer(f"STORE +FLAGS \\Seen uid={uid}"):
-                    client.add_flags([uid], ["\\Seen"])
-                log.info("mark_as_read: uid=%d marked as read", uid)
-                return _finalize_response(
-                    json.dumps({"success": True, "message": "Email marked as read"})
-                )
-            finally:
-                client.logout()
-        except Exception as e:
-            log.exception("mark_as_read failed")
-            return _finalize_response(json.dumps({"success": False, "error": str(e)}))
+            with _imap_timer(f"SELECT {folder!r}"):
+                client.select_folder(folder, readonly=False)
+            with _imap_timer(f"STORE +FLAGS \\Seen uid={uid}"):
+                client.add_flags([uid], ["\\Seen"])
+            log.info("mark_as_read: uid=%d marked as read", uid)
+            return _finalize_response(
+                json.dumps({"success": True, "message": "Email marked as read"})
+            )
+        finally:
+            client.logout()
 
     async def mark_as_read(self, uid: int, folder: str = "INBOX") -> str:
         """
@@ -560,57 +533,52 @@ class Tools:
     def _sync_create_draft(self, to: str, subject: str, body: str, cc: str) -> str:
         _start_timing()
         log.info("create_draft(to=%r, subject=%r)", to, subject)
+
+        if not to or not subject:
+            raise ValueError("Recipient (to) and subject are required")
+
+        msg = self._create_message(to=to, subject=subject, body=body, cc=cc)
+
+        client = self._get_client()
         try:
-            if not to or not subject:
-                return _finalize_response(json.dumps(
-                    {"success": False, "error": "Recipient (to) and subject are required"}
-                ))
+            with _imap_timer("LIST (find drafts folder)"):
+                raw_folders = client.list_folders()
 
-            msg = self._create_message(to=to, subject=subject, body=body, cc=cc)
+            draft_folders = ["Drafts", "[Gmail]/Drafts", "INBOX.Drafts", "Draft"]
+            drafts_folder = None
 
-            client = self._get_client()
-            try:
-                with _imap_timer("LIST (find drafts folder)"):
-                    raw_folders = client.list_folders()
+            for flags, delimiter, name in raw_folders:
+                if name in draft_folders or b"\\Drafts" in flags:
+                    drafts_folder = name
+                    break
 
-                draft_folders = ["Drafts", "[Gmail]/Drafts", "INBOX.Drafts", "Draft"]
-                drafts_folder = None
+            if not drafts_folder:
+                drafts_folder = "Drafts"
 
-                for flags, delimiter, name in raw_folders:
-                    if name in draft_folders or b"\\Drafts" in flags:
-                        drafts_folder = name
-                        break
+            with _imap_timer(f"APPEND to {drafts_folder!r}"):
+                client.append(
+                    drafts_folder,
+                    msg.as_bytes(),
+                    flags=["\\Draft", "\\Seen"],
+                    msg_time=datetime.now(timezone.utc),
+                )
 
-                if not drafts_folder:
-                    drafts_folder = "Drafts"
-
-                with _imap_timer(f"APPEND to {drafts_folder!r}"):
-                    client.append(
-                        drafts_folder,
-                        msg.as_bytes(),
-                        flags=["\\Draft", "\\Seen"],
-                        msg_time=datetime.now(timezone.utc),
-                    )
-
-                log.info("create_draft: saved to %s", drafts_folder)
-                return _finalize_response(json.dumps(
-                    {
-                        "success": True,
-                        "message": f"Draft saved to {drafts_folder}",
-                        "draft": {
-                            "to": to,
-                            "subject": subject,
-                            "cc": cc,
-                            "folder": drafts_folder,
-                        },
+            log.info("create_draft: saved to %s", drafts_folder)
+            return _finalize_response(json.dumps(
+                {
+                    "success": True,
+                    "message": f"Draft saved to {drafts_folder}",
+                    "draft": {
+                        "to": to,
+                        "subject": subject,
+                        "cc": cc,
+                        "folder": drafts_folder,
                     },
-                    indent=2,
-                ))
-            finally:
-                client.logout()
-        except Exception as e:
-            log.exception("create_draft failed")
-            return _finalize_response(json.dumps({"success": False, "error": str(e)}))
+                },
+                indent=2,
+            ))
+        finally:
+            client.logout()
 
     async def create_draft(
         self,
@@ -633,32 +601,28 @@ class Tools:
     def _sync_move_email(self, uid: int, source_folder: str, dest_folder: str) -> str:
         _start_timing()
         log.info("move_email(uid=%d, %r -> %r)", uid, source_folder, dest_folder)
+        client = self._get_client()
         try:
-            client = self._get_client()
+            with _imap_timer(f"SELECT {source_folder!r}"):
+                client.select_folder(source_folder, readonly=False)
             try:
-                with _imap_timer(f"SELECT {source_folder!r}"):
-                    client.select_folder(source_folder, readonly=False)
-                try:
-                    with _imap_timer(f"MOVE uid={uid} -> {dest_folder!r}"):
-                        client.move([uid], dest_folder)
-                except Exception:
-                    log.debug("MOVE not supported, falling back to COPY+DELETE")
-                    with _imap_timer(f"COPY uid={uid} -> {dest_folder!r}"):
-                        client.copy([uid], dest_folder)
-                    with _imap_timer(f"DELETE uid={uid}"):
-                        client.delete_messages([uid])
-                    with _imap_timer("EXPUNGE"):
-                        client.expunge()
+                with _imap_timer(f"MOVE uid={uid} -> {dest_folder!r}"):
+                    client.move([uid], dest_folder)
+            except Exception:
+                log.debug("MOVE not supported, falling back to COPY+DELETE")
+                with _imap_timer(f"COPY uid={uid} -> {dest_folder!r}"):
+                    client.copy([uid], dest_folder)
+                with _imap_timer(f"DELETE uid={uid}"):
+                    client.delete_messages([uid])
+                with _imap_timer("EXPUNGE"):
+                    client.expunge()
 
-                log.info("move_email: uid=%d moved to %s", uid, dest_folder)
-                return _finalize_response(json.dumps(
-                    {"success": True, "message": f"Email moved to {dest_folder}"}
-                ))
-            finally:
-                client.logout()
-        except Exception as e:
-            log.exception("move_email failed")
-            return _finalize_response(json.dumps({"success": False, "error": str(e)}))
+            log.info("move_email: uid=%d moved to %s", uid, dest_folder)
+            return _finalize_response(json.dumps(
+                {"success": True, "message": f"Email moved to {dest_folder}"}
+            ))
+        finally:
+            client.logout()
 
     async def move_email(self, uid: int, source_folder: str, dest_folder: str) -> str:
         """
