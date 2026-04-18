@@ -12,6 +12,7 @@ import email
 import json
 import logging
 import re
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -27,13 +28,41 @@ log = logging.getLogger("openwebui_imap_tool")
 from imapclient import IMAPClient
 from pydantic import BaseModel, Field
 
+_thread_local = threading.local()
+
 
 @contextmanager
 def _imap_timer(operation: str):
-    """Log the wall-clock time of an IMAP operation."""
+    """Log and collect the wall-clock time of an IMAP operation."""
     t0 = time.monotonic()
     yield
-    log.info("IMAP %s (%.1fms)", operation, (time.monotonic() - t0) * 1000)
+    elapsed = round((time.monotonic() - t0) * 1000, 1)
+    log.debug("IMAP %s (%.1fms)", operation, elapsed)
+    timings = getattr(_thread_local, "timings", None)
+    if timings is not None:
+        timings.append({"op": operation, "ms": elapsed})
+
+
+def _start_timing():
+    """Begin collecting IMAP call timings for the current thread."""
+    _thread_local.timings = []
+    _thread_local.t0 = time.monotonic()
+
+
+def _finalize_response(json_str: str) -> str:
+    """Inject collected timing data into a JSON response string."""
+    timings = getattr(_thread_local, "timings", None) or []
+    t0 = getattr(_thread_local, "t0", None)
+    _thread_local.timings = None
+    _thread_local.t0 = None
+
+    total_ms = round((time.monotonic() - t0) * 1000, 1) if t0 else None
+    try:
+        data = json.loads(json_str)
+        data["_timing"] = {"total_ms": total_ms, "calls": timings}
+        return json.dumps(data, indent=2)
+    except Exception:
+        return json_str
 
 
 # =============================================================================
@@ -199,6 +228,7 @@ class Tools:
         return client
 
     def _sync_list_folders(self) -> str:
+        _start_timing()
         log.info("list_folders()")
         try:
             client = self._get_client()
@@ -221,12 +251,12 @@ class Tools:
                         folders.append({"name": name, "messages": None, "unread": None})
 
                 log.info("list_folders: found %d folders", len(folders))
-                return json.dumps(folders, indent=2)
+                return _finalize_response(json.dumps(folders, indent=2))
             finally:
                 client.logout()
         except Exception as e:
             log.exception("list_folders failed")
-            return json.dumps({"error": str(e)})
+            return _finalize_response(json.dumps({"error": str(e)}))
 
     async def list_folders(self) -> str:
         """
@@ -237,6 +267,7 @@ class Tools:
         return await asyncio.to_thread(self._sync_list_folders)
 
     def _sync_search_emails(self, query: str, folder: str, limit: int) -> str:
+        _start_timing()
         log.info("search_emails(query=%r, folder=%r, limit=%d)", query, folder, limit)
         try:
             client = self._get_client()
@@ -267,7 +298,7 @@ class Tools:
                 uids = sorted(uids, reverse=True)[:limit]
 
                 if not uids:
-                    return json.dumps({"count": 0, "results": []})
+                    return _finalize_response(json.dumps({"count": 0, "results": []}))
 
                 with _imap_timer(f"FETCH ENVELOPE for {len(uids)} UIDs"):
                     fetch_data = client.fetch(uids, ["ENVELOPE", "FLAGS"])
@@ -320,12 +351,14 @@ class Tools:
                         )
 
                 log.info("search_emails: returning %d results", len(results))
-                return json.dumps({"count": len(results), "results": results}, indent=2)
+                return _finalize_response(
+                    json.dumps({"count": len(results), "results": results}, indent=2)
+                )
             finally:
                 client.logout()
         except Exception as e:
             log.exception("search_emails failed")
-            return json.dumps({"error": str(e)})
+            return _finalize_response(json.dumps({"error": str(e)}))
 
     async def search_emails(
         self,
@@ -344,6 +377,7 @@ class Tools:
         return await asyncio.to_thread(self._sync_search_emails, query, folder, limit)
 
     def _sync_get_email(self, uid: int, folder: str) -> str:
+        _start_timing()
         log.info("get_email(uid=%d, folder=%r)", uid, folder)
         try:
             client = self._get_client()
@@ -355,7 +389,9 @@ class Tools:
                     fetch_data = client.fetch([uid], ["RFC822", "FLAGS"])
 
                 if uid not in fetch_data:
-                    return json.dumps({"error": f"Email with UID {uid} not found"})
+                    return _finalize_response(
+                        json.dumps({"error": f"Email with UID {uid} not found"})
+                    )
 
                 data = fetch_data[uid]
                 raw_email = data.get(b"RFC822")
@@ -365,7 +401,9 @@ class Tools:
                 ]
 
                 if not raw_email:
-                    return json.dumps({"error": "Could not fetch email content"})
+                    return _finalize_response(
+                        json.dumps({"error": "Could not fetch email content"})
+                    )
 
                 log.debug("IMAP FETCH uid=%d: %d bytes", uid, len(raw_email))
                 msg = email.message_from_bytes(raw_email)
@@ -428,12 +466,12 @@ class Tools:
                 }
 
                 log.info("get_email: uid=%d subject=%r", uid, subject)
-                return json.dumps(result, indent=2)
+                return _finalize_response(json.dumps(result, indent=2))
             finally:
                 client.logout()
         except Exception as e:
             log.exception("get_email failed")
-            return json.dumps({"error": str(e)})
+            return _finalize_response(json.dumps({"error": str(e)}))
 
     async def get_email(self, uid: int, folder: str = "INBOX") -> str:
         """
@@ -456,6 +494,7 @@ class Tools:
         return await self.search_emails(query="UNSEEN", folder=folder, limit=limit)
 
     def _sync_get_folder_stats(self, folder: str) -> str:
+        _start_timing()
         log.info("get_folder_stats(folder=%r)", folder)
         try:
             client = self._get_client()
@@ -465,19 +504,19 @@ class Tools:
                 total = status.get(b"MESSAGES", 0)
                 unread = status.get(b"UNSEEN", 0)
                 log.info("get_folder_stats: %s has %d messages (%d unread)", folder, total, unread)
-                return json.dumps(
+                return _finalize_response(json.dumps(
                     {
                         "folder": folder,
                         "total_messages": total,
                         "unread_messages": unread,
                     },
                     indent=2,
-                )
+                ))
             finally:
                 client.logout()
         except Exception as e:
             log.exception("get_folder_stats failed")
-            return json.dumps({"error": str(e)})
+            return _finalize_response(json.dumps({"error": str(e)}))
 
     async def get_folder_stats(self, folder: str = "INBOX") -> str:
         """
@@ -489,6 +528,7 @@ class Tools:
         return await asyncio.to_thread(self._sync_get_folder_stats, folder)
 
     def _sync_mark_as_read(self, uid: int, folder: str) -> str:
+        _start_timing()
         log.info("mark_as_read(uid=%d, folder=%r)", uid, folder)
         try:
             client = self._get_client()
@@ -498,12 +538,14 @@ class Tools:
                 with _imap_timer(f"STORE +FLAGS \\Seen uid={uid}"):
                     client.add_flags([uid], ["\\Seen"])
                 log.info("mark_as_read: uid=%d marked as read", uid)
-                return json.dumps({"success": True, "message": "Email marked as read"})
+                return _finalize_response(
+                    json.dumps({"success": True, "message": "Email marked as read"})
+                )
             finally:
                 client.logout()
         except Exception as e:
             log.exception("mark_as_read failed")
-            return json.dumps({"success": False, "error": str(e)})
+            return _finalize_response(json.dumps({"success": False, "error": str(e)}))
 
     async def mark_as_read(self, uid: int, folder: str = "INBOX") -> str:
         """
@@ -516,12 +558,13 @@ class Tools:
         return await asyncio.to_thread(self._sync_mark_as_read, uid, folder)
 
     def _sync_create_draft(self, to: str, subject: str, body: str, cc: str) -> str:
+        _start_timing()
         log.info("create_draft(to=%r, subject=%r)", to, subject)
         try:
             if not to or not subject:
-                return json.dumps(
+                return _finalize_response(json.dumps(
                     {"success": False, "error": "Recipient (to) and subject are required"}
-                )
+                ))
 
             msg = self._create_message(to=to, subject=subject, body=body, cc=cc)
 
@@ -550,7 +593,7 @@ class Tools:
                     )
 
                 log.info("create_draft: saved to %s", drafts_folder)
-                return json.dumps(
+                return _finalize_response(json.dumps(
                     {
                         "success": True,
                         "message": f"Draft saved to {drafts_folder}",
@@ -562,12 +605,12 @@ class Tools:
                         },
                     },
                     indent=2,
-                )
+                ))
             finally:
                 client.logout()
         except Exception as e:
             log.exception("create_draft failed")
-            return json.dumps({"success": False, "error": str(e)})
+            return _finalize_response(json.dumps({"success": False, "error": str(e)}))
 
     async def create_draft(
         self,
@@ -588,6 +631,7 @@ class Tools:
         return await asyncio.to_thread(self._sync_create_draft, to, subject, body, cc)
 
     def _sync_move_email(self, uid: int, source_folder: str, dest_folder: str) -> str:
+        _start_timing()
         log.info("move_email(uid=%d, %r -> %r)", uid, source_folder, dest_folder)
         try:
             client = self._get_client()
@@ -607,14 +651,14 @@ class Tools:
                         client.expunge()
 
                 log.info("move_email: uid=%d moved to %s", uid, dest_folder)
-                return json.dumps(
+                return _finalize_response(json.dumps(
                     {"success": True, "message": f"Email moved to {dest_folder}"}
-                )
+                ))
             finally:
                 client.logout()
         except Exception as e:
             log.exception("move_email failed")
-            return json.dumps({"success": False, "error": str(e)})
+            return _finalize_response(json.dumps({"success": False, "error": str(e)}))
 
     async def move_email(self, uid: int, source_folder: str, dest_folder: str) -> str:
         """
