@@ -9,7 +9,10 @@ requirements: imapclient
 
 import email
 import json
+import logging
 import re
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.header import decode_header
@@ -18,8 +21,18 @@ from email.mime.text import MIMEText
 from email.utils import formataddr, formatdate, make_msgid, parseaddr, parsedate_to_datetime
 from typing import Optional
 
+log = logging.getLogger("openwebui_imap_tool")
+
 from imapclient import IMAPClient
 from pydantic import BaseModel, Field
+
+
+@contextmanager
+def _imap_timer(operation: str):
+    """Log the wall-clock time of an IMAP operation."""
+    t0 = time.monotonic()
+    yield
+    log.debug("IMAP %s (%.1fms)", operation, (time.monotonic() - t0) * 1000)
 
 
 # =============================================================================
@@ -167,12 +180,21 @@ class Tools:
                 "IMAP not configured. Please set host, username and password in Valves."
             )
 
-        client = IMAPClient(
+        log.debug(
+            "Connecting to %s:%d (ssl=%s) as %s",
             self.valves.imap_host,
-            port=self.valves.imap_port,
-            ssl=self.valves.use_ssl,
+            self.valves.imap_port,
+            self.valves.use_ssl,
+            self.valves.imap_username,
         )
-        client.login(self.valves.imap_username, self.valves.imap_password)
+        with _imap_timer("CONNECT"):
+            client = IMAPClient(
+                self.valves.imap_host,
+                port=self.valves.imap_port,
+                ssl=self.valves.use_ssl,
+            )
+        with _imap_timer("LOGIN"):
+            client.login(self.valves.imap_username, self.valves.imap_password)
         return client
 
     def list_folders(self) -> str:
@@ -181,13 +203,17 @@ class Tools:
 
         :return: JSON list of folders with name, message count, and unread count
         """
+        log.info("list_folders()")
         try:
             client = self._get_client()
             try:
+                with _imap_timer("LIST"):
+                    raw_folders = client.list_folders()
                 folders = []
-                for flags, delimiter, name in client.list_folders():
+                for flags, delimiter, name in raw_folders:
                     try:
-                        status = client.folder_status(name, ["MESSAGES", "UNSEEN"])
+                        with _imap_timer(f"STATUS {name!r}"):
+                            status = client.folder_status(name, ["MESSAGES", "UNSEEN"])
                         folders.append(
                             {
                                 "name": name,
@@ -198,10 +224,12 @@ class Tools:
                     except Exception:
                         folders.append({"name": name, "messages": None, "unread": None})
 
+                log.info("list_folders: found %d folders", len(folders))
                 return json.dumps(folders, indent=2)
             finally:
                 client.logout()
         except Exception as e:
+            log.exception("list_folders failed")
             return json.dumps({"error": str(e)})
 
     def search_emails(
@@ -218,12 +246,13 @@ class Tools:
         :param limit: Maximum number of results (default: 10)
         :return: JSON list of matching emails with uid, subject, from, date
         """
+        log.info("search_emails(query=%r, folder=%r, limit=%d)", query, folder, limit)
         try:
             client = self._get_client()
             try:
-                client.select_folder(folder, readonly=True)
+                with _imap_timer(f"SELECT {folder!r}"):
+                    client.select_folder(folder, readonly=True)
 
-                # Parse search criteria
                 if query.upper() == "ALL":
                     search_criteria = ["ALL"]
                 elif query.upper() == "UNSEEN":
@@ -241,14 +270,16 @@ class Tools:
                 else:
                     search_criteria = ["TEXT", query]
 
-                uids = client.search(search_criteria)
+                with _imap_timer(f"SEARCH {search_criteria}"):
+                    uids = client.search(search_criteria)
+                log.info("IMAP SEARCH returned %d UIDs", len(uids))
                 uids = sorted(uids, reverse=True)[:limit]
 
                 if not uids:
                     return json.dumps({"count": 0, "results": []})
 
-                # Fetch envelope data
-                fetch_data = client.fetch(uids, ["ENVELOPE", "FLAGS"])
+                with _imap_timer(f"FETCH ENVELOPE for {len(uids)} UIDs"):
+                    fetch_data = client.fetch(uids, ["ENVELOPE", "FLAGS"])
 
                 results = []
                 for uid, data in fetch_data.items():
@@ -297,10 +328,12 @@ class Tools:
                             }
                         )
 
+                log.info("search_emails: returning %d results", len(results))
                 return json.dumps({"count": len(results), "results": results}, indent=2)
             finally:
                 client.logout()
         except Exception as e:
+            log.exception("search_emails failed")
             return json.dumps({"error": str(e)})
 
     def get_email(self, uid: int, folder: str = "INBOX") -> str:
@@ -311,12 +344,15 @@ class Tools:
         :param folder: The folder containing the email (default: INBOX)
         :return: Full email content including headers and body
         """
+        log.info("get_email(uid=%d, folder=%r)", uid, folder)
         try:
             client = self._get_client()
             try:
-                client.select_folder(folder, readonly=True)
+                with _imap_timer(f"SELECT {folder!r}"):
+                    client.select_folder(folder, readonly=True)
 
-                fetch_data = client.fetch([uid], ["RFC822", "FLAGS"])
+                with _imap_timer(f"FETCH RFC822 uid={uid}"):
+                    fetch_data = client.fetch([uid], ["RFC822", "FLAGS"])
 
                 if uid not in fetch_data:
                     return json.dumps({"error": f"Email with UID {uid} not found"})
@@ -331,15 +367,14 @@ class Tools:
                 if not raw_email:
                     return json.dumps({"error": "Could not fetch email content"})
 
+                log.debug("IMAP FETCH uid=%d: %d bytes", uid, len(raw_email))
                 msg = email.message_from_bytes(raw_email)
 
-                # Parse headers
                 subject = decode_mime_header(msg.get("Subject", ""))
                 from_addr = parse_address(msg.get("From"))
                 to_addrs = parse_address_list(msg.get("To"))
                 cc_addrs = parse_address_list(msg.get("Cc"))
 
-                # Parse date
                 date = None
                 date_str = msg.get("Date")
                 if date_str:
@@ -348,7 +383,6 @@ class Tools:
                     except Exception:
                         pass
 
-                # Parse body
                 body_text = None
                 body_html = None
 
@@ -376,7 +410,6 @@ class Tools:
                         else:
                             body_text = text
 
-                # Prefer text, fallback to stripped HTML
                 body = body_text
                 if not body and body_html:
                     body = re.sub(r"<[^>]+>", "", body_html)
@@ -394,10 +427,12 @@ class Tools:
                     "is_flagged": "\\Flagged" in flags,
                 }
 
+                log.info("get_email: uid=%d subject=%r", uid, subject)
                 return json.dumps(result, indent=2)
             finally:
                 client.logout()
         except Exception as e:
+            log.exception("get_email failed")
             return json.dumps({"error": str(e)})
 
     def list_unread(self, folder: str = "INBOX", limit: int = 10) -> str:
@@ -417,21 +452,27 @@ class Tools:
         :param folder: The folder to get stats for (default: INBOX)
         :return: JSON with total_messages and unread_messages
         """
+        log.info("get_folder_stats(folder=%r)", folder)
         try:
             client = self._get_client()
             try:
-                status = client.folder_status(folder, ["MESSAGES", "UNSEEN"])
+                with _imap_timer(f"STATUS {folder!r}"):
+                    status = client.folder_status(folder, ["MESSAGES", "UNSEEN"])
+                total = status.get(b"MESSAGES", 0)
+                unread = status.get(b"UNSEEN", 0)
+                log.info("get_folder_stats: %s has %d messages (%d unread)", folder, total, unread)
                 return json.dumps(
                     {
                         "folder": folder,
-                        "total_messages": status.get(b"MESSAGES", 0),
-                        "unread_messages": status.get(b"UNSEEN", 0),
+                        "total_messages": total,
+                        "unread_messages": unread,
                     },
                     indent=2,
                 )
             finally:
                 client.logout()
         except Exception as e:
+            log.exception("get_folder_stats failed")
             return json.dumps({"error": str(e)})
 
     def mark_as_read(self, uid: int, folder: str = "INBOX") -> str:
@@ -442,15 +483,20 @@ class Tools:
         :param folder: The folder containing the email (default: INBOX)
         :return: Success or error message
         """
+        log.info("mark_as_read(uid=%d, folder=%r)", uid, folder)
         try:
             client = self._get_client()
             try:
-                client.select_folder(folder, readonly=False)
-                client.add_flags([uid], ["\\Seen"])
+                with _imap_timer(f"SELECT {folder!r}"):
+                    client.select_folder(folder, readonly=False)
+                with _imap_timer(f"STORE +FLAGS \\Seen uid={uid}"):
+                    client.add_flags([uid], ["\\Seen"])
+                log.info("mark_as_read: uid=%d marked as read", uid)
                 return json.dumps({"success": True, "message": "Email marked as read"})
             finally:
                 client.logout()
         except Exception as e:
+            log.exception("mark_as_read failed")
             return json.dumps({"success": False, "error": str(e)})
 
     def create_draft(
@@ -469,6 +515,7 @@ class Tools:
         :param cc: CC recipients, comma-separated (optional)
         :return: JSON with success status and draft info
         """
+        log.info("create_draft(to=%r, subject=%r)", to, subject)
         try:
             if not to or not subject:
                 return json.dumps(
@@ -479,10 +526,13 @@ class Tools:
 
             client = self._get_client()
             try:
+                with _imap_timer("LIST (find drafts folder)"):
+                    raw_folders = client.list_folders()
+
                 draft_folders = ["Drafts", "[Gmail]/Drafts", "INBOX.Drafts", "Draft"]
                 drafts_folder = None
 
-                for flags, delimiter, name in client.list_folders():
+                for flags, delimiter, name in raw_folders:
                     if name in draft_folders or b"\\Drafts" in flags:
                         drafts_folder = name
                         break
@@ -490,13 +540,15 @@ class Tools:
                 if not drafts_folder:
                     drafts_folder = "Drafts"
 
-                client.append(
-                    drafts_folder,
-                    msg.as_bytes(),
-                    flags=["\\Draft", "\\Seen"],
-                    msg_time=datetime.now(timezone.utc),
-                )
+                with _imap_timer(f"APPEND to {drafts_folder!r}"):
+                    client.append(
+                        drafts_folder,
+                        msg.as_bytes(),
+                        flags=["\\Draft", "\\Seen"],
+                        msg_time=datetime.now(timezone.utc),
+                    )
 
+                log.info("create_draft: saved to %s", drafts_folder)
                 return json.dumps(
                     {
                         "success": True,
@@ -513,6 +565,7 @@ class Tools:
             finally:
                 client.logout()
         except Exception as e:
+            log.exception("create_draft failed")
             return json.dumps({"success": False, "error": str(e)})
 
     def move_email(self, uid: int, source_folder: str, dest_folder: str) -> str:
@@ -524,23 +577,30 @@ class Tools:
         :param dest_folder: The destination folder
         :return: Success or error message
         """
+        log.info("move_email(uid=%d, %r -> %r)", uid, source_folder, dest_folder)
         try:
             client = self._get_client()
             try:
-                client.select_folder(source_folder, readonly=False)
+                with _imap_timer(f"SELECT {source_folder!r}"):
+                    client.select_folder(source_folder, readonly=False)
                 try:
-                    client.move([uid], dest_folder)
+                    with _imap_timer(f"MOVE uid={uid} -> {dest_folder!r}"):
+                        client.move([uid], dest_folder)
                 except Exception:
-                    # Fallback: copy then delete
-                    client.copy([uid], dest_folder)
-                    client.delete_messages([uid])
-                    client.expunge()
+                    log.debug("MOVE not supported, falling back to COPY+DELETE")
+                    with _imap_timer(f"COPY uid={uid} -> {dest_folder!r}"):
+                        client.copy([uid], dest_folder)
+                    with _imap_timer(f"DELETE uid={uid}"):
+                        client.delete_messages([uid])
+                    with _imap_timer("EXPUNGE"):
+                        client.expunge()
 
+                log.info("move_email: uid=%d moved to %s", uid, dest_folder)
                 return json.dumps(
                     {"success": True, "message": f"Email moved to {dest_folder}"}
                 )
             finally:
                 client.logout()
         except Exception as e:
+            log.exception("move_email failed")
             return json.dumps({"success": False, "error": str(e)})
-
