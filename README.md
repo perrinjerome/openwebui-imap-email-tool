@@ -1,6 +1,6 @@
 # IMAP Email Tool for Open WebUI
 
-Access and manage emails via IMAP/SMTP directly from Open WebUI. Search, read, compose, and send emails through an AI assistant.
+Access and manage emails via IMAP directly from Open WebUI. Search, read, and organize emails through an AI assistant.
 
 ## Features
 
@@ -15,10 +15,8 @@ Access and manage emails via IMAP/SMTP directly from Open WebUI. Search, read, c
 - **Mark as Read** - Update email read status
 - **Move Email** - Move messages between folders (with automatic fallback to copy+delete)
 
-### Composing & Sending
-- **Create Draft** - Save drafts to the Drafts folder
-- **Send Email** - Send messages immediately via SMTP with CC/BCC support
-- **Reply to Email** - Reply or reply-all with proper threading (In-Reply-To, References headers)
+### Drafts
+- **Create Draft** - Compose and save drafts to the Drafts folder
 
 ## Requirements
 
@@ -51,7 +49,6 @@ Access and manage emails via IMAP/SMTP directly from Open WebUI. Search, read, c
    - **Name**: Give it a descriptive name (e.g., "Email Assistant")
    - **Base Model**: Select your preferred LLM (GPT-4, Claude, Llama, etc.)
    - **System Prompt**: Copy and paste the system prompt from [system_prompt.md](system_prompt.md)
-     - Use the **English** or **German** version depending on your preference
    - **Tools**: Enable the **IMAP Email Tool** by selecting it from the available tools
 4. Click **Save**
 
@@ -76,19 +73,7 @@ Configure the tool via **Valves** (tool settings):
 | `imap_username` | - | Email address / username |
 | `imap_password` | - | Password or app-specific password |
 | `use_ssl` | true | Use SSL/TLS connection |
-
-### SMTP Settings
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `smtp_host` | - | SMTP server (auto-derived from IMAP if empty) |
-| `smtp_port` | 587 | SMTP port (587 for STARTTLS, 465 for SSL) |
-| `smtp_use_tls` | true | Use STARTTLS (port 587) |
-| `smtp_use_ssl` | false | Use SSL (port 465, overrides TLS) |
-
-### Sender Settings
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `sender_name` | - | Display name for sent emails (e.g., "John Doe") |
+| `sender_name` | - | Display name for draft emails (e.g., "John Doe") |
 
 ### Example Configurations
 
@@ -96,9 +81,6 @@ Configure the tool via **Valves** (tool settings):
 ```
 imap_host: imap.gmail.com
 imap_port: 993
-smtp_host: smtp.gmail.com
-smtp_port: 587
-smtp_use_tls: true
 ```
 > Note: Gmail requires an [App Password](https://support.google.com/accounts/answer/185833)
 
@@ -106,9 +88,6 @@ smtp_use_tls: true
 ```
 imap_host: outlook.office365.com
 imap_port: 993
-smtp_host: smtp.office365.com
-smtp_port: 587
-smtp_use_tls: true
 ```
 
 ## System Prompt
@@ -116,11 +95,11 @@ smtp_use_tls: true
 The system prompt teaches the AI how to effectively use the email tool. It includes:
 
 - Available functions and their parameters
-- Best practices (confirm before sending, use drafts for complex emails)
+- Best practices for searching and reading emails
 - Example workflows for common tasks
 - Formatting guidelines
 
-See [system_prompt.md](system_prompt.md) for ready-to-use prompts in **English** and **German**.
+See [system_prompt.md](system_prompt.md) for a ready-to-use prompt.
 
 ## Available Functions
 
@@ -133,9 +112,7 @@ See [system_prompt.md](system_prompt.md) for ready-to-use prompts in **English**
 | `get_folder_stats()` | `folder` | Get folder statistics |
 | `mark_as_read()` | `uid`, `folder` | Mark email as read |
 | `move_email()` | `uid`, `source_folder`, `dest_folder` | Move email |
-| `create_draft()` | `to`, `subject`, `body`, `cc` | Create draft |
-| `send_email()` | `to`, `subject`, `body`, `cc`, `bcc` | Send email |
-| `reply_to_email()` | `uid`, `body`, `folder`, `reply_all` | Reply to email |
+| `create_draft()` | `to`, `subject`, `body`, `cc` | Create and save draft |
 
 ### Search Query Syntax
 
@@ -158,20 +135,11 @@ See [system_prompt.md](system_prompt.md) for ready-to-use prompts in **English**
 - AI calls `search_emails("FROM:john")` to find UIDs
 - AI calls `get_email(uid)` to fetch content
 
-**User:** "Reply with 'Thanks for the update'"
-- AI calls `reply_to_email(uid, "Thanks for the update")`
-
-**User:** "Send an email to team@company.com about the meeting"
-- AI asks for details, creates draft with `create_draft()`
-- Shows draft for confirmation
-- Sends with `send_email()` upon approval
-
 ## Security Notes
 
 - Use app-specific passwords when available (Gmail, Microsoft, etc.)
 - Credentials are stored in Open WebUI's valve configuration
 - The tool uses secure connections (SSL/TLS) by default
-- Sent emails are automatically saved to the Sent folder
 
 ## Author
 
@@ -183,4 +151,4 @@ MIT License
 
 ## Version
 
-0.2.0
+0.3.0
