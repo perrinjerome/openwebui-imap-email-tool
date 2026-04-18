@@ -16,7 +16,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.header import decode_header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -24,6 +24,10 @@ from email.utils import formataddr, formatdate, make_msgid, parseaddr, parsedate
 from typing import Optional
 
 log = logging.getLogger("openwebui_imap_tool")
+
+import imaplib
+
+imaplib._MAXLINE = 10_000_000
 
 from imapclient import IMAPClient
 from pydantic import BaseModel, Field
@@ -278,6 +282,9 @@ class Tools:
                 raw_folders = client.list_folders()
             folders = []
             for flags, delimiter, name in raw_folders:
+                if b"\\Noselect" in flags:
+                    log.debug("Skipping non-selectable folder %r", name)
+                    continue
                 with _imap_timer(f"STATUS {name!r}"):
                     status = client.folder_status(name, ["MESSAGES", "UNSEEN"])
                 folders.append(
@@ -563,6 +570,50 @@ class Tools:
         :return: Success or error message
         """
         return await asyncio.to_thread(self._sync_mark_as_read, uid, folder)
+
+    def _sync_mark_old_as_read(self, folder: str, days: int) -> str:
+        _start_timing()
+        log.info("mark_old_as_read(folder=%r, days=%d)", folder, days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        before_str = cutoff.strftime("%d-%b-%Y")
+
+        with self._client() as client:
+            with _imap_timer(f"SELECT {folder!r}"):
+                client.select_folder(folder, readonly=False)
+            with _imap_timer(f"SEARCH UNSEEN BEFORE {before_str}"):
+                uids = client.search(["UNSEEN", "BEFORE", before_str])
+            log.info("mark_old_as_read: found %d unseen emails before %s", len(uids), before_str)
+
+            if not uids:
+                return _finalize_response(json.dumps({
+                    "success": True,
+                    "marked": 0,
+                    "message": f"No unseen emails older than {days} days in {folder}",
+                }))
+
+            BATCH = 2500
+            for i in range(0, len(uids), BATCH):
+                batch = uids[i : i + BATCH]
+                with _imap_timer(f"STORE +FLAGS \\Seen batch {i // BATCH + 1} ({len(batch)} UIDs)"):
+                    client.add_flags(batch, ["\\Seen"])
+
+            log.info("mark_old_as_read: marked %d emails as read", len(uids))
+            return _finalize_response(json.dumps({
+                "success": True,
+                "marked": len(uids),
+                "message": f"Marked {len(uids)} emails as read (older than {days} days in {folder})",
+                "cutoff_date": before_str,
+            }, indent=2))
+
+    async def mark_old_as_read(self, folder: str = "INBOX", days: int = 30) -> str:
+        """
+        Mark all unseen emails older than a given number of days as read.
+
+        :param folder: The folder to clean up (default: INBOX)
+        :param days: Mark unseen emails older than this many days (default: 30)
+        :return: JSON with count of emails marked as read
+        """
+        return await asyncio.to_thread(self._sync_mark_old_as_read, folder, days)
 
     def _sync_create_draft(self, to: str, subject: str, body: str, cc: str) -> str:
         _start_timing()
