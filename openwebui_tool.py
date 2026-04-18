@@ -4,9 +4,10 @@ author: Sandro Scalco - liitu consulting gmbh
 description: Access and manage emails via IMAP. Search, read, and organize emails.
 version: 0.3.0
 required_open_webui_version: 0.4.0
-requirements: imapclient
+#requirements: imapclient
 """
 
+import asyncio
 import email
 import json
 import logging
@@ -32,7 +33,7 @@ def _imap_timer(operation: str):
     """Log the wall-clock time of an IMAP operation."""
     t0 = time.monotonic()
     yield
-    log.debug("IMAP %s (%.1fms)", operation, (time.monotonic() - t0) * 1000)
+    log.info("IMAP %s (%.1fms)", operation, (time.monotonic() - t0) * 1000)
 
 
 # =============================================================================
@@ -197,12 +198,7 @@ class Tools:
             client.login(self.valves.imap_username, self.valves.imap_password)
         return client
 
-    def list_folders(self) -> str:
-        """
-        List all email folders/mailboxes with message counts.
-
-        :return: JSON list of folders with name, message count, and unread count
-        """
+    def _sync_list_folders(self) -> str:
         log.info("list_folders()")
         try:
             client = self._get_client()
@@ -232,20 +228,15 @@ class Tools:
             log.exception("list_folders failed")
             return json.dumps({"error": str(e)})
 
-    def search_emails(
-        self,
-        query: str = "ALL",
-        folder: str = "INBOX",
-        limit: int = 10,
-    ) -> str:
+    async def list_folders(self) -> str:
         """
-        Search for emails in a folder.
+        List all email folders/mailboxes with message counts.
 
-        :param query: Search query. Examples: "ALL", "UNSEEN", "FLAGGED", "FROM:john@example.com", "SUBJECT:meeting", "TEXT:project"
-        :param folder: Folder to search in (default: INBOX)
-        :param limit: Maximum number of results (default: 10)
-        :return: JSON list of matching emails with uid, subject, from, date
+        :return: JSON list of folders with name, message count, and unread count
         """
+        return await asyncio.to_thread(self._sync_list_folders)
+
+    def _sync_search_emails(self, query: str, folder: str, limit: int) -> str:
         log.info("search_emails(query=%r, folder=%r, limit=%d)", query, folder, limit)
         try:
             client = self._get_client()
@@ -336,14 +327,23 @@ class Tools:
             log.exception("search_emails failed")
             return json.dumps({"error": str(e)})
 
-    def get_email(self, uid: int, folder: str = "INBOX") -> str:
+    async def search_emails(
+        self,
+        query: str = "ALL",
+        folder: str = "INBOX",
+        limit: int = 10,
+    ) -> str:
         """
-        Get the full content of an email by its UID.
+        Search for emails in a folder.
 
-        :param uid: The unique identifier of the email (from search results)
-        :param folder: The folder containing the email (default: INBOX)
-        :return: Full email content including headers and body
+        :param query: Search query. Examples: "ALL", "UNSEEN", "FLAGGED", "FROM:john@example.com", "SUBJECT:meeting", "TEXT:project"
+        :param folder: Folder to search in (default: INBOX)
+        :param limit: Maximum number of results (default: 10)
+        :return: JSON list of matching emails with uid, subject, from, date
         """
+        return await asyncio.to_thread(self._sync_search_emails, query, folder, limit)
+
+    def _sync_get_email(self, uid: int, folder: str) -> str:
         log.info("get_email(uid=%d, folder=%r)", uid, folder)
         try:
             client = self._get_client()
@@ -435,7 +435,17 @@ class Tools:
             log.exception("get_email failed")
             return json.dumps({"error": str(e)})
 
-    def list_unread(self, folder: str = "INBOX", limit: int = 10) -> str:
+    async def get_email(self, uid: int, folder: str = "INBOX") -> str:
+        """
+        Get the full content of an email by its UID.
+
+        :param uid: The unique identifier of the email (from search results)
+        :param folder: The folder containing the email (default: INBOX)
+        :return: Full email content including headers and body
+        """
+        return await asyncio.to_thread(self._sync_get_email, uid, folder)
+
+    async def list_unread(self, folder: str = "INBOX", limit: int = 10) -> str:
         """
         List unread emails in a folder.
 
@@ -443,15 +453,9 @@ class Tools:
         :param limit: Maximum number of emails to return (default: 10)
         :return: JSON list of unread emails
         """
-        return self.search_emails(query="UNSEEN", folder=folder, limit=limit)
+        return await self.search_emails(query="UNSEEN", folder=folder, limit=limit)
 
-    def get_folder_stats(self, folder: str = "INBOX") -> str:
-        """
-        Get statistics for a folder (total and unread count).
-
-        :param folder: The folder to get stats for (default: INBOX)
-        :return: JSON with total_messages and unread_messages
-        """
+    def _sync_get_folder_stats(self, folder: str) -> str:
         log.info("get_folder_stats(folder=%r)", folder)
         try:
             client = self._get_client()
@@ -475,14 +479,16 @@ class Tools:
             log.exception("get_folder_stats failed")
             return json.dumps({"error": str(e)})
 
-    def mark_as_read(self, uid: int, folder: str = "INBOX") -> str:
+    async def get_folder_stats(self, folder: str = "INBOX") -> str:
         """
-        Mark an email as read.
+        Get statistics for a folder (total and unread count).
 
-        :param uid: The UID of the email
-        :param folder: The folder containing the email (default: INBOX)
-        :return: Success or error message
+        :param folder: The folder to get stats for (default: INBOX)
+        :return: JSON with total_messages and unread_messages
         """
+        return await asyncio.to_thread(self._sync_get_folder_stats, folder)
+
+    def _sync_mark_as_read(self, uid: int, folder: str) -> str:
         log.info("mark_as_read(uid=%d, folder=%r)", uid, folder)
         try:
             client = self._get_client()
@@ -499,22 +505,17 @@ class Tools:
             log.exception("mark_as_read failed")
             return json.dumps({"success": False, "error": str(e)})
 
-    def create_draft(
-        self,
-        to: str,
-        subject: str,
-        body: str,
-        cc: str = "",
-    ) -> str:
+    async def mark_as_read(self, uid: int, folder: str = "INBOX") -> str:
         """
-        Create a draft email and save it to the Drafts folder.
+        Mark an email as read.
 
-        :param to: Recipient email address(es), comma-separated for multiple
-        :param subject: Email subject line
-        :param body: Email body text
-        :param cc: CC recipients, comma-separated (optional)
-        :return: JSON with success status and draft info
+        :param uid: The UID of the email
+        :param folder: The folder containing the email (default: INBOX)
+        :return: Success or error message
         """
+        return await asyncio.to_thread(self._sync_mark_as_read, uid, folder)
+
+    def _sync_create_draft(self, to: str, subject: str, body: str, cc: str) -> str:
         log.info("create_draft(to=%r, subject=%r)", to, subject)
         try:
             if not to or not subject:
@@ -568,15 +569,25 @@ class Tools:
             log.exception("create_draft failed")
             return json.dumps({"success": False, "error": str(e)})
 
-    def move_email(self, uid: int, source_folder: str, dest_folder: str) -> str:
+    async def create_draft(
+        self,
+        to: str,
+        subject: str,
+        body: str,
+        cc: str = "",
+    ) -> str:
         """
-        Move an email to a different folder.
+        Create a draft email and save it to the Drafts folder.
 
-        :param uid: The UID of the email to move
-        :param source_folder: The current folder of the email
-        :param dest_folder: The destination folder
-        :return: Success or error message
+        :param to: Recipient email address(es), comma-separated for multiple
+        :param subject: Email subject line
+        :param body: Email body text
+        :param cc: CC recipients, comma-separated (optional)
+        :return: JSON with success status and draft info
         """
+        return await asyncio.to_thread(self._sync_create_draft, to, subject, body, cc)
+
+    def _sync_move_email(self, uid: int, source_folder: str, dest_folder: str) -> str:
         log.info("move_email(uid=%d, %r -> %r)", uid, source_folder, dest_folder)
         try:
             client = self._get_client()
@@ -604,3 +615,15 @@ class Tools:
         except Exception as e:
             log.exception("move_email failed")
             return json.dumps({"success": False, "error": str(e)})
+
+    async def move_email(self, uid: int, source_folder: str, dest_folder: str) -> str:
+        """
+        Move an email to a different folder.
+
+        :param uid: The UID of the email to move
+        :param source_folder: The current folder of the email
+        :param dest_folder: The destination folder
+        :return: Success or error message
+        """
+        return await asyncio.to_thread(self._sync_move_email, uid, source_folder, dest_folder)
+
